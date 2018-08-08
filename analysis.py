@@ -1,7 +1,7 @@
 import csv
 import os
 import dataparse as dp
-
+import analysis_utils as utils
 import pandas as pd
 import sqlite3 as sq
 import matplotlib.pyplot as plt
@@ -10,67 +10,33 @@ import numpy as np
 import writepiazzadata as wp
 
 
-connection = sq.connect("csdata.sqlite3")
+figpath = "figs"
+
+connection = sq.connect("analysis.sqlite3")
 cursor = connection.cursor()
 
-with open("CreateAnalysisTables.sql", "r") as sql_file:
-    sql_script = sql_file.read()
+# Joins together posts and tags
+utils.executeSQLFile("CreateAnalysisTables.sql", cursor)
 
-cursor.executescript(sql_script)
-# df = pd.read_sql_query("SELECT * FROM all_data_tags WHERE semId = 8;", connection)
-# df = df.drop(["id", "id:1", "postId:1", "semId:1", "id:2"], axis=1)
+# Gets all post data, including tags
+posts = pd.read_sql_query("SELECT * FROM all_data_tags WHERE semId = 8;", connection)
 
-cursor.execute("SELECT * FROM all_data_tags WHERE semId = 8;")
-names = [description[0] for description in cursor.description]
+# Maps each user's Piazza ID to some data about the questions
+# they asked
+users2Questions = utils.populateUsers2Questions(posts)
 
-rows = []
-for row in cursor.fetchall():
-    row_dict = dict(
-        zip(list(description[0] for description in cursor.description), row))
-    rows.append(row_dict)
-
-
-users2Questions = {}
-for item in rows:
-    if item['userId'] in users2Questions.keys():
-        users2Questions[item['userId']]['questions'].append(item['content'])
-        users2Questions[item['userId']]['tagNames'].append(item['tagName'])
-    else:
-        insert = {'grade': item['grade'],
-                  'questions': [item['content'], ],
-                  'tagNames': [item['tagName'],]}
-        users2Questions[item['userId']] = insert
-
-count = 0
-for userId, dicti in sorted(users2Questions.items(), key= lambda x: x[0]):
-    if dicti['grade'] != "Not found":
-        # print(userId, len(dicti['questions']), dicti['tagNames'],
-        #     dicti['grade'])
-        count += 1
-
-tags = [x['tagName'] for x in rows]
-counts = np.asarray(np.unique(tags, return_counts=True)).T
-total = sum([int(x[1]) for x in counts])
-print("Total posts:", total)
-for tup in counts:
-    print(tup[0], tup[1], round(float(tup[1])/total, 2))
-
-tag_range = np.arange(len(counts))
-tag_names = [tup[0] for tup in counts]
-tag_counts = [tup[1] for tup in counts]
-tag_props = [round(float(tup[1]))/total for tup in counts]
-
-plt.bar(tag_range, tag_counts, align='center', alpha=.5)
-plt.xticks(tag_range, tag_names)
-plt.ylabel('Number of questions tagged')
+# Plotting the frequency of the different tags
+posts['tagName'].value_counts(normalize=True).plot(kind='bar', )
+plt.ylabel('Proportion of questions tagged')
 plt.title('Tagging')
-plt.savefig("tags.png", bbox_inches='tight')
-plt.show()
+plt.savefig("tag2.png", bbox_inches='tight')
+plt.close()
 
-
+# Get all grade data files from the data/grades directory
 gradeFiles = dp.getFilesWithName("grades", ".csv",
                                  os.path.join("./data", "grades"))
-grades = []
+# Create a list of students and their final grades
+graded_students = []
 for gradeFile in gradeFiles:
     with open(gradeFile, "r") as file:
         reader = csv.reader(file)
@@ -81,121 +47,82 @@ for gradeFile in gradeFiles:
                      'netID': line[0],
                      'email': line[9],
                      'grade': line[10]}
-            grades.append(entry)
-count = 0
+            graded_students.append(entry)
+
+# Get all the students originally parsed from the piazza student data
+# From Spring 2018
 sp18_students = list(filter(lambda x: x['semester'] == 'sp18', wp.master_student_list))
 
 
-def compareIgnoreMiddleName(name1, name2):
-    name_array1 = name1.split(" ")
-    name_array2 = name2.split(" ")
-    if len(name_array1) == 3:
-        short_name1 = [name_array1[0], name_array1[2]]
-    else:
-        short_name1 = name_array1
-    if len(name_array2) == 3:
-        short_name2 = [name_array2[0], name_array2[2]]
-    else:
-        short_name2 = name_array2
-    map(lambda x: x.strip().lower(), short_name1)
-    map(lambda x: x.strip().lower(), short_name2)
-    return short_name1 == short_name2
-
-
+# Compare all students to the graded_student list to see if there's
+# a matching person. If so, add the matched grade to the user
+# dictionary
 for user in sp18_students:
-    for entry in grades:
-        if (user['name'] == entry['name'] or entry['email'] == user['email']
-                or entry['netID'] in user['email'] or compareIgnoreMiddleName(user['name'], entry['name'])):
+    for entry in graded_students:
+        if (utils.sameUser(entry, user)):
             user['grade'] = entry['grade']
-            # print("Found grade for user {}".format(user))
             break
     if user.get('grade', None) is None:
         user['grade'] = "Not found"
-        count += 1
-        #print("NOT FOUND: USER ", count, user)
-        #print(count, user['name'])
 
-    else:
-        #count += 1
-        pass
+    # Also add the numConstructive and numActive post entries from the
+    # users2Questions dictionary
+    user['numConstructive'] = users2Questions.get(user['user_id'], {'numConstructive': -1})['numConstructive']
+    user['numActive'] = users2Questions.get(user['user_id'], {'numActive': -1})['numActive']
 
+# Make a data frame with our user data
 user_frame = pd.DataFrame(sp18_students)
 
-questioner_df = user_frame[(user_frame['asks'] >= 1) & (user_frame['grade'] != "Not found") & (user_frame['grade'] != "W")]
-no_questions_df = user_frame[(user_frame['asks'] < 1) & (user_frame['grade'] != "Not found") & (user_frame['grade'] != "W")
-                    & (user_frame['grade'] != "S") & (user_frame['grade'] != "D")]
+# Create a new column to indicate whether a user asked a question or not
+user_frame['askedquestion'] = np.where(user_frame['asks'] >= 1, "yes", "no")
 
-questioner_grades = questioner_df['grade'].value_counts()
-print()
-question = {}
-for tup in zip(questioner_grades.index, questioner_grades):
-    question[tup[0]] = (tup[1], round(float(tup[1]) / sum(questioner_grades), 2))
-    print(tup[0], question[tup[0]])
-questioner_grades.plot(kind='bar')
-plt.savefig("plot")
-
-no_questioner_grades = no_questions_df['grade'].value_counts()
-print()
-no_question = {}
-for tup in zip(no_questioner_grades.index, no_questioner_grades):
-    no_question[tup[0]] = (tup[1], round(float(tup[1]) / sum(no_questioner_grades), 2))
-    print(tup[0], no_question[tup[0]])
-no_questioner_grades.plot(kind='bar')
-plt.savefig("no_questions_plot")
-
-prop_dict = {}
-
-for item in question.keys():
-    prop_dict[item] = [question[item][1],]
-for item in no_question.keys():
-    if prop_dict.get(item, None) is not None:
-        prop_dict[item].append(no_question.get(item, (0, 0))[1])
-    else:
-        prop_dict[item] = [0, no_question['item'][1]]
-for key, value in prop_dict.items():
-    if len(value) == 1:
-        prop_dict[key].append(0)
-print(prop_dict)
-# 0 index of list is people who asked questions, 1 index is not
-
-prop_frame = pd.DataFrame(prop_dict)
-prop_frame = prop_frame.T.sort_index(ascending=True)
-prop_frame.rename(index=str, columns={0: "Question-Askers",
-                                      1: "No Questions Asked"}, inplace=True)
-prop_frame.plot(kind='bar', secondary_y='No Questions Asked')
+# Creating a new frame to graph the number of students with each
+# letter grade, based on whether they asked a question or not
+grades_asked_frame = user_frame[user_frame['grade'] != 'Not found']
+grades_asked_frame.groupby('grade')['askedquestion']\
+    .value_counts(normalize=False).unstack().plot(kind='bar')
 plt.ylabel("Proportion of total grades")
 plt.xlabel("Letter Grades")
 plt.title("Proportion of grades at each letter rank, divided by question asking")
 plt.savefig("compare")
 plt.close()
-print(user_frame.keys())
-user_frame['askedquestion'] = np.where(user_frame['asks'] >= 1, "yes", "no")
 
-gpa = {
-    "A+": 4.0,
-    "A": 4.0,
-    "A-": 3.7,
-    "B+": 3.3,
-    "B": 3.0,
-    "B-": 2.7,
-    "C+": 2.3,
-    "C": 2.0,
-    "C-": 1.7,
-    "D+": 1.3,
-    "D": 1.0,
-    "D-": 1.0,
-    "F": 0.0,
-    "Not found": None,
-    "W": None,
-    "S": None
-}
+# Create a new column to show whether a student asked a constructive
+# question
+user_frame['asked_constructive_question'] = \
+    np.where((user_frame['numConstructive']) > -1 &
+             (user_frame['askedquestion'] == 'yes'),
+                "yes", "no")
 
-def getGPA(row):
-    return gpa[row]
+# Create a new column -- whether a student asked an active question
+user_frame['asked_active_question'] = user_frame.apply(
+    lambda row: (row['numActive'] > 0) & (row['askedquestion'] == 'yes'), axis=1)
+
+# Create new column GPA which converts grade letters to gpa numbers
+user_frame['gpa'] = user_frame['grade'].apply(utils.getGPA)
+
+# Show the proportion of people who asked constructive questions
+# Among those who asked any questions at all
+print(user_frame.groupby('askedquestion')['asked_constructive_question'].value_counts(normalize=True))
+# Does the same for active questions
+print(user_frame.groupby('askedquestion')['asked_active_question'].value_counts(normalize=True))
 
 
-user_frame['gpa'] = user_frame['grade'].apply(getGPA)
+# Show the average GPAs for people who ask constructive questions and
+# people who ask active questions
 
-print(user_frame.groupby("askedquestion")["gpa"].std())
-print(user_frame.groupby("askedquestion").count())
-plt.savefig("gpa")
+print(user_frame.groupby('askedquestion'))
+
+
+user_frame[user_frame['numConstructive'] != -1]['numConstructive']\
+    .value_counts().sort_index().plot(kind='line', legend=True, xticks=range(0, 21, 2))
+user_frame[(user_frame['numActive'] != -1) & (user_frame['numActive'] < 21)]\
+    ['numActive'].value_counts().sort_index().plot(kind='line', legend=True, xticks=range(0, 21, 2))
+plt.xlabel("No. of Questions Asked")
+plt.ylabel("No. of Students")
+plt.savefig("constructive")
+plt.close()
+
+
+
+
