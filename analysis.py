@@ -110,18 +110,35 @@ print(user_frame.groupby('askedquestion')['asked_active_question'].value_counts(
 
 # Show the average GPAs for people who ask constructive questions and
 # people who ask active questions
+print()
+print("MEAN")
+print(user_frame.groupby(['askedquestion', 'asked_constructive_question'])['gpa'].mean())
+print(user_frame.groupby(['askedquestion', 'asked_active_question'])['gpa'].mean())
+print()
+print("STD")
+print(user_frame.groupby(['askedquestion', 'asked_constructive_question'])['gpa'].std())
+print(user_frame.groupby(['askedquestion', 'asked_active_question'])['gpa'].std())
+print()
+print("COUNT")
+print(user_frame.groupby(['askedquestion', 'asked_constructive_question'])['gpa'].value_counts())
+print(user_frame.groupby(['askedquestion', 'asked_active_question'])['gpa'].value_counts())
+print()
 
-print(user_frame.groupby('askedquestion'))
-
-
+# Creates a plot of Number of students
+# vs. Number of constructive and active questions asked
 user_frame[user_frame['numConstructive'] != -1]['numConstructive']\
-    .value_counts().sort_index().plot(kind='line', legend=True, xticks=range(0, 21, 2))
+    .value_counts().sort_index().plot(kind='line',
+                                      legend=True, xticks=range(0, 21, 2))
 user_frame[(user_frame['numActive'] != -1) & (user_frame['numActive'] < 21)]\
-    ['numActive'].value_counts().sort_index().plot(kind='line', legend=True, xticks=range(0, 21, 2))
+    ['numActive'].value_counts().sort_index().plot(kind='line',
+                                                   legend=True, xticks=range(0, 21, 2))
 plt.xlabel("No. of Questions Asked")
 plt.ylabel("No. of Students")
-plt.savefig("constructive")
+plt.savefig("num_students_vs_num_questions")
 plt.close()
+
+
+
 
 
 
